@@ -1,0 +1,14 @@
+# Secrets - never commit these
+credentials.py
+.env
+*.json
+!package.json
+
+# Python
+__pycache__/
+*.pyc
+venv/
+
+# Airflow
+logs/
+plugins/
