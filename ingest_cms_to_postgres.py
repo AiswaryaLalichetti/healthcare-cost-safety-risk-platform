@@ -1,7 +1,8 @@
 """
-Ingests CMS Medicare provider enrollment data and lands it in the
-operational PostgreSQL database (structured landing zone), instead of
-going straight to GCS. Airflow will later extract from here into the lake.
+Ingests CMS Medicare Physician & Other Practitioners - by Geography and
+Service data, filtered to drug-related HCPCS codes only (HCPCS_Drug_Ind = Y)
+-- these are the physician-administered drugs (injectables, infusions,
+biologics) that can be matched against openFDA recall data by drug name.
 
 Before running:
   pip install psycopg2-binary requests
@@ -15,12 +16,21 @@ import psycopg2
 
 from credentials import POSTGRES_HOST, POSTGRES_PORT, POSTGRES_DB, POSTGRES_USER, POSTGRES_PASSWORD
 
-CMS_DATASET_ID = "2457ea29-fc82-48b0-86ec-3b0755de7515"
+CMS_DATASET_ID = "6fea9d79-0129-4e4c-b1b8-23cd86a4f435"
 CMS_URL = f"https://data.cms.gov/data-api/v1/dataset/{CMS_DATASET_ID}/data"
 
+PAGE_SIZE = 5000
+MAX_PAGES = 40  # increase later for more volume
 
-def fetch_cms_data(size=100, offset=0):
-    params = {"size": size, "offset": offset}
+
+def fetch_cms_page(size, offset):
+    # Server-side filter: only drug-related HCPCS codes (physician-administered
+    # drugs), which is what lets us later join against recall data by drug name.
+    params = {
+        "size": size,
+        "offset": offset,
+        "filter[HCPCS_Drug_Ind]": "Y",
+    }
     response = requests.get(CMS_URL, params=params)
     response.raise_for_status()
     return response.json()
@@ -28,22 +38,19 @@ def fetch_cms_data(size=100, offset=0):
 
 def get_connection():
     return psycopg2.connect(
-        host=POSTGRES_HOST,
-        port=POSTGRES_PORT,
-        dbname=POSTGRES_DB,
-        user=POSTGRES_USER,
-        password=POSTGRES_PASSWORD,
+        host=POSTGRES_HOST, port=POSTGRES_PORT, dbname=POSTGRES_DB,
+        user=POSTGRES_USER, password=POSTGRES_PASSWORD,
     )
 
 
 def ensure_table(conn):
-    """Creates the landing table if it doesn't exist yet.
-    Storing each record as JSONB keeps this flexible even though the
-    table itself is 'structured' (a real, defined schema for the landing
-    zone) — the JSONB column holds each provider record as-is."""
     with conn.cursor() as cur:
+        # Drop and recreate so each run starts clean — this project is still
+        # in active development, so we don't need to preserve old test data
+        # across dataset changes.
+        cur.execute("DROP TABLE IF EXISTS cms_provider_enrollment;")
         cur.execute("""
-            CREATE TABLE IF NOT EXISTS cms_provider_enrollment (
+            CREATE TABLE cms_provider_enrollment (
                 id SERIAL PRIMARY KEY,
                 ingested_at TIMESTAMPTZ NOT NULL,
                 record JSONB NOT NULL
@@ -64,17 +71,23 @@ def insert_records(conn, records):
 
 
 def run():
-    print("Fetching CMS provider enrollment data...")
-    data = fetch_cms_data(size=100, offset=0)
-    print(f"Retrieved {len(data)} records.")
-
     conn = get_connection()
+    total = 0
     try:
         ensure_table(conn)
-        insert_records(conn, data)
-        print(f"Inserted {len(data)} records into PostgreSQL (cms_provider_enrollment).")
+        for page in range(MAX_PAGES):
+            offset = page * PAGE_SIZE
+            print(f"Fetching drug-related rows {offset} to {offset + PAGE_SIZE}...")
+            records = fetch_cms_page(PAGE_SIZE, offset)
+            if not records:
+                print("No more data returned — stopping early.")
+                break
+            insert_records(conn, records)
+            total += len(records)
+            print(f"  Inserted {len(records)} rows (running total: {total})")
     finally:
         conn.close()
+    print(f"\nDone. Total drug-related CMS rows inserted: {total}")
 
 
 if __name__ == "__main__":
