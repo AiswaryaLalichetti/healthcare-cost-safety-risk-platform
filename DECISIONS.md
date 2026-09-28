@@ -165,6 +165,28 @@ join logic before they reached a dashboard. Both required understanding
 
 ## Status: Gold layer complete — 4 dbt models, 10/10 tests passing. Real SQL join between CMS cost data and openFDA recalls, by drug name.
 
+## Decision: AI insight layer — grounded explanations, with real-world API resilience
+
+**Implementation:** a script reads the top 50 highest-`combined_risk_score`
+drugs from the gold table and prompts Gemini to write a 2-3 sentence
+explanation using ONLY the numbers provided (payment gap, dollar impact,
+recall count/severity) — explicitly forbidden from adding outside
+knowledge, the same grounding lesson from the earlier PDF hallucination,
+now applied at a different (safer) layer: summarizing verified computed
+data instead of extracting from raw text.
+**Real production concerns handled:** hit the free tier's 15-requests/minute
+limit partway through the first run, and separately a transient 503
+"server overloaded" error. Fixed with a deliberate delay between calls
+plus automatic retry-with-backoff for both error types, and made the
+batch resilient to a single failure (skip and continue, rather than
+losing the whole run). This is standard, expected practice for any real
+external API integration, not a sign of a flawed setup.
+**Output:** `drug_risk_explanations` table in Snowflake — pre-generated,
+so the dashboard/demo reads fast, static text rather than calling the
+LLM live on every view.
+
+## Status: AI insight layer complete — 50/50 explanations generated, grounded and verified.
+
 Ingestion pipeline (both sources) running on an automated daily schedule via Airflow,
 confirmed with both a scheduled and a manual successful run.
 
