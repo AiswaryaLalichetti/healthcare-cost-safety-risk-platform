@@ -12,3 +12,8 @@ venv/
 # Airflow
 logs/
 plugins/
+
+# dbt
+target/
+dbt_packages/
+logs/

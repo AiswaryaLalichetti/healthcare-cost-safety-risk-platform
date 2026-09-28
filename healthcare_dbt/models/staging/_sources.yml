@@ -1,0 +1,11 @@
+version: 2
+
+sources:
+  - name: raw
+    database: healthcare_pipeline
+    schema: raw
+    tables:
+      - name: cms_drug_payments
+        description: Medicare payment/charge data for physician-administered drugs, loaded from CMS via PySpark.
+      - name: openfda_recalls
+        description: FDA drug recall records, loaded from openFDA via PySpark.

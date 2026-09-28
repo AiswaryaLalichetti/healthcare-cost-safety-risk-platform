@@ -1,0 +1,50 @@
+version: 2
+
+models:
+  - name: stg_cms_drug_payments
+    description: Cleaned, aggregated CMS drug payment data -- one row per drug, National level, combined across place-of-service.
+    columns:
+      - name: hcpcs_code
+        description: The procedure/drug billing code.
+        tests:
+          - not_null
+          - unique
+      - name: payment_gap_pct
+        description: Percent gap between submitted charge and Medicare payment.
+        tests:
+          - not_null
+
+  - name: stg_openfda_recalls
+    description: Cleaned openFDA drug recall data. One row per (recall, drug name) pair -- recall_number can repeat when a recall names multiple drugs, so it is intentionally NOT tested as unique here.
+    columns:
+      - name: recall_number
+        description: FDA recall identifier (not unique at this grain -- see model description).
+        tests:
+          - not_null
+      - name: classification
+        description: FDA severity classification.
+        tests:
+          - accepted_values:
+              arguments:
+                values: ['Class I', 'Class II', 'Class III']
+
+  - name: drug_cost_safety_risk
+    description: Gold-layer model joining CMS cost data to openFDA recalls by drug name, with a combined risk score.
+    columns:
+      - name: hcpcs_code
+        tests:
+          - not_null
+          - unique
+      - name: cost_risk_tier
+        tests:
+          - accepted_values:
+              arguments:
+                values: ['High', 'Medium', 'Low']
+      - name: safety_risk_tier
+        tests:
+          - accepted_values:
+              arguments:
+                values: ['High', 'Medium', 'Low', 'None']
+      - name: combined_risk_score
+        tests:
+          - not_null

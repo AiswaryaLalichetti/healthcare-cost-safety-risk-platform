@@ -2,15 +2,16 @@
 Reads today's raw JSON files from GCS (bronze), cleans and flattens each
 source with PySpark, and writes structured Parquet back to GCS (silver).
 
-Design note: Spark's native GCS connector normally expects a service
-account key file for auth — which we don't have (blocked by org policy).
-So instead, this script uses the google-cloud-storage client (which
-already works via ADC) purely for file I/O — downloading raw files locally
-and uploading Parquet results back up — while Spark itself only ever reads
-and writes local files. This sidesteps the auth mismatch entirely.
+Two sources now: CMS drug payment/charge data (structured) and openFDA
+drug recalls (semi-structured). The PDF source was dropped.
 
-Before running:
-    pip install --user pyspark google-cloud-storage
+Design note: Spark reads/writes local files only; the google-cloud-storage
+client (via ADC) handles all GCS I/O, sidestepping the service-account-key
+requirement of Spark's native GCS connector.
+
+Usage:
+    python process_bronze_to_silver.py [YYYY-MM-DD]
+    (defaults to today's date if not given)
 """
 
 import sys
@@ -20,22 +21,16 @@ from datetime import date
 
 os.environ["PYSPARK_PYTHON"] = sys.executable
 os.environ["PYSPARK_DRIVER_PYTHON"] = sys.executable
-
-# Windows needs winutils.exe/hadoop.dll for Spark to write output locally.
-# Set this to wherever you placed the downloaded files.
 os.environ["HADOOP_HOME"] = "C:\\hadoop"
 os.environ["PATH"] = os.environ["HADOOP_HOME"] + "\\bin;" + os.environ["PATH"]
 
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, explode, explode_outer
+from pyspark.sql.functions import col, explode_outer
 from google.cloud import storage
 
-PROJECT_ID = "project-2ec4ed93-b7da-4d0e-998"
+PROJECT_ID = "your-project-id"
 BUCKET_NAME = "healthcare-pipeline-1"
 
-# Set this to the date your ingestion actually ran on (check your GCS
-# bucket's raw/ folders to confirm), or pass it as a command-line argument:
-#   python process_bronze_to_silver.py 2026-09-17
 if len(sys.argv) > 1:
     TODAY = sys.argv[1]
 else:
@@ -70,7 +65,7 @@ def upload_folder_to_gcs(local_folder, gcs_prefix):
     bucket = client.bucket(BUCKET_NAME)
     for fname in os.listdir(local_folder):
         if fname.startswith("_"):
-            continue  # skip Spark's _SUCCESS / _committed metadata files
+            continue
         local_path = os.path.join(local_folder, fname)
         blob = bucket.blob(f"{gcs_prefix}/{fname}")
         blob.upload_from_filename(local_path)
@@ -78,14 +73,31 @@ def upload_folder_to_gcs(local_folder, gcs_prefix):
 
 
 def process_cms(spark):
-    print("\n--- Processing CMS provider enrollment ---")
+    print("\n--- Processing CMS drug payment/charges data ---")
     raw_path = f"raw/cms-provider-enrollment/{TODAY}/provider_enrollment.json"
     local_raw = os.path.join(LOCAL_TMP, "cms_raw.json")
     download_from_gcs(raw_path, local_raw)
 
     df = spark.read.option("multiLine", "true").json(local_raw)
-    # Flatten the nested "record" struct into top-level columns
-    flat = df.select("id", "ingested_at", "record.*")
+    flat = df.select(
+        "id", "ingested_at",
+        col("record.HCPCS_Cd").alias("hcpcs_code"),
+        col("record.HCPCS_Desc").alias("drug_desc"),
+        col("record.Rndrng_Prvdr_Geo_Desc").alias("geography"),
+        col("record.Tot_Rndrng_Prvdrs").cast("double").alias("total_providers"),
+        col("record.Tot_Srvcs").cast("double").alias("total_services"),
+        col("record.Avg_Sbmtd_Chrg").cast("double").alias("avg_submitted_charge"),
+        col("record.Avg_Mdcr_Alowd_Amt").cast("double").alias("avg_medicare_allowed"),
+        col("record.Avg_Mdcr_Pymt_Amt").cast("double").alias("avg_medicare_paid"),
+    )
+    flat = flat.withColumn(
+        "payment_gap_pct",
+        ((col("avg_submitted_charge") - col("avg_medicare_paid")) / col("avg_submitted_charge")) * 100
+    ).withColumn(
+        "dollar_impact",
+        col("total_services") * (col("avg_submitted_charge") - col("avg_medicare_paid"))
+    )
+
     flat.printSchema()
     print(f"Row count: {flat.count()}")
 
@@ -94,58 +106,34 @@ def process_cms(spark):
     upload_folder_to_gcs(out_path, f"silver/cms-provider-enrollment/{TODAY}")
 
 
-def process_openfda(spark):
-    print("\n--- Processing openFDA adverse events ---")
-    raw_path = f"raw/openfda/{TODAY}/adverse_events.json"
+def process_openfda_recalls(spark):
+    print("\n--- Processing openFDA drug recalls ---")
+    raw_path = f"raw/openfda-recalls/{TODAY}/drug_recalls.json"
     local_raw = os.path.join(LOCAL_TMP, "openfda_raw.json")
     download_from_gcs(raw_path, local_raw)
 
     df = spark.read.option("multiLine", "true").json(local_raw)
-    # openFDA records are deeply nested and vary a lot — select the fields
-    # that matter for denial-risk/safety analysis, and explode the reaction
-    # array so each row is one (report, reaction) pair rather than one
-    # report with a nested list buried inside it.
+    # openfda.generic_name is an array (a recall can cover multiple generic
+    # names) -- explode so each row is one (recall, drug name) pair, which
+    # is what lets us later join against the CMS drug data by name.
     flat = (
         df.select(
-            col("safetyreportid"),
-            col("receivedate"),
-            col("serious"),
-            explode_outer("patient.reaction").alias("reaction"),
-        )
-        .select(
-            "safetyreportid",
-            "receivedate",
-            "serious",
-            col("reaction.reactionmeddrapt").alias("reaction_term"),
+            col("recall_number"),
+            col("classification"),
+            col("status"),
+            col("recalling_firm"),
+            col("reason_for_recall"),
+            col("report_date"),
+            col("distribution_pattern"),
+            explode_outer(col("openfda.generic_name")).alias("generic_name"),
         )
     )
     flat.printSchema()
     print(f"Row count: {flat.count()}")
 
-    out_path = os.path.join(LOCAL_TMP, "silver_openfda")
+    out_path = os.path.join(LOCAL_TMP, "silver_openfda_recalls")
     flat.write.mode("overwrite").parquet(out_path)
-    upload_folder_to_gcs(out_path, f"silver/openfda/{TODAY}")
-
-
-def process_pdf_extracts(spark):
-    print("\n--- Processing CMS manual PDF extracts ---")
-    raw_path = f"raw/cms-manual-extracts/{TODAY}/manual_extracts.json"
-    local_raw = os.path.join(LOCAL_TMP, "pdf_raw.json")
-    download_from_gcs(raw_path, local_raw)
-
-    df = spark.read.option("multiLine", "true").json(local_raw)
-    # One row per candidate denial rule, tagged with which chapter it came from
-    flat = df.select(
-        "chapter",
-        "source_url",
-        explode_outer("candidate_denial_rules").alias("denial_rule"),
-    )
-    flat.printSchema()
-    print(f"Row count: {flat.count()}")
-
-    out_path = os.path.join(LOCAL_TMP, "silver_pdf_extracts")
-    flat.write.mode("overwrite").parquet(out_path)
-    upload_folder_to_gcs(out_path, f"silver/cms-manual-extracts/{TODAY}")
+    upload_folder_to_gcs(out_path, f"silver/openfda-recalls/{TODAY}")
 
 
 def run():
@@ -154,8 +142,7 @@ def run():
 
     try:
         process_cms(spark)
-        process_openfda(spark)
-        process_pdf_extracts(spark)
+        process_openfda_recalls(spark)
     finally:
         spark.stop()
         shutil.rmtree(LOCAL_TMP, ignore_errors=True)
