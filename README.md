@@ -1,5 +1,7 @@
 # Healthcare Drug Cost & Safety Risk Intelligence Platform
 
+**🔗 [Live interactive demo](https://healthcare-cost-safety-risk-platform.streamlit.app/)**
+
 An end-to-end data engineering + analytics pipeline that ingests real public
 healthcare data, models it through a cloud lakehouse, and joins cost data
 to drug safety data to surface a single, connected risk signal — not two
