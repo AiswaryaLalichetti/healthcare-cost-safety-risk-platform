@@ -1,20 +1,20 @@
 """
 Streamlit live demo: Healthcare Drug Cost & Safety Risk Intelligence.
 
-Reads directly from Snowflake (gold layer + AI explanations) and shows
-an interactive, filterable view of the combined risk analysis.
+Reads from a saved data snapshot (data/drug_risk_snapshot.csv), exported
+from the Snowflake gold layer + AI explanations. Using a snapshot instead
+of a live Snowflake connection means this public app keeps working even
+after the Snowflake trial expires -- a deliberate choice for a portfolio
+demo, documented in DECISIONS.md.
+
+To refresh with newer data: run export_snapshot.py, then commit the
+updated CSV.
 
 Run locally with: streamlit run app.py
 """
 
 import streamlit as st
 import pandas as pd
-import snowflake.connector
-
-from credentials import (
-    SNOWFLAKE_ACCOUNT, SNOWFLAKE_USER, SNOWFLAKE_PASSWORD,
-    SNOWFLAKE_WAREHOUSE, SNOWFLAKE_DATABASE,
-)
 
 st.set_page_config(
     page_title="Healthcare Drug Cost & Safety Risk",
@@ -22,39 +22,9 @@ st.set_page_config(
 )
 
 
-@st.cache_resource
-def get_connection():
-    return snowflake.connector.connect(
-        account=SNOWFLAKE_ACCOUNT,
-        user=SNOWFLAKE_USER,
-        password=SNOWFLAKE_PASSWORD,
-        warehouse=SNOWFLAKE_WAREHOUSE,
-        database=SNOWFLAKE_DATABASE,
-        schema="gold",
-    )
-
-
-@st.cache_data(ttl=600)
+@st.cache_data
 def load_data():
-    conn = get_connection()
-    query = """
-        SELECT
-            r.HCPCS_CODE, r.DRUG_DESC, r.TOTAL_SERVICES,
-            r.AVG_SUBMITTED_CHARGE, r.AVG_MEDICARE_PAID,
-            r.PAYMENT_GAP_PCT, r.DOLLAR_IMPACT, r.COST_RISK_TIER,
-            r.TOTAL_RECALLS, r.ONGOING_RECALLS, r.SAFETY_RISK_TIER,
-            r.COMBINED_RISK_SCORE,
-            e.AI_EXPLANATION
-        FROM drug_cost_safety_risk r
-        LEFT JOIN drug_risk_explanations e
-            ON r.HCPCS_CODE = e.HCPCS_CODE
-        ORDER BY r.COMBINED_RISK_SCORE DESC
-    """
-    cur = conn.cursor()
-    cur.execute(query)
-    columns = [c[0] for c in cur.description]
-    rows = cur.fetchall()
-    return pd.DataFrame(rows, columns=columns)
+    return pd.read_csv("data/drug_risk_snapshot.csv")
 
 
 df = load_data()
@@ -132,3 +102,12 @@ for _, row in filtered.head(10).iterrows():
             st.write(row["AI_EXPLANATION"])
         else:
             st.write("No AI explanation generated for this drug yet.")
+
+st.divider()
+st.caption(
+    "This demo reads from a periodically-refreshed data snapshot rather than "
+    "a live database connection, so it keeps working independent of any "
+    "trial/credential lifecycle. In production, this would query Snowflake "
+    "directly -- the full pipeline code (Airflow, PySpark, dbt, the AI layer) "
+    "is in the GitHub repo linked above."
+)
